@@ -23,7 +23,7 @@ from kafkatest.services.security.security_config import SecurityConfig
 from ducktape.utils.util import wait_until
 from ducktape.mark import matrix
 import subprocess, itertools, time
-from collections import Counter
+from collections import Counter, namedtuple
 import operator
 
 class ConnectDistributedTest(Test):
@@ -155,7 +155,6 @@ class ConnectDistributedTest(Test):
         wait_until(lambda: self.connector_is_running(self.sink), timeout_sec=10,
                    err_msg="Failed to see connector transition to the RUNNING state")
 
-    
     @matrix(connector_type=["source", "sink"])
     def test_restart_failed_task(self, connector_type):
         self.setup_services()
@@ -166,12 +165,12 @@ class ConnectDistributedTest(Test):
         if connector_type == "sink":
             connector = MockSink(self.cc, self.topics.keys(), mode='task-failure', delay_sec=5)
         else:
-            connector = MockSource(self.cc, self.topics.keys(), mode='task-failure', delay_sec=5)
+            connector = MockSource(self.cc, mode='task-failure', delay_sec=5)
             
         connector.start()
 
         task_id = 0
-        wait_until(lambda: self.task_is_failed(connector, task_id), timeout_sec=15,
+        wait_until(lambda: self.task_is_failed(connector, task_id), timeout_sec=20,
                    err_msg="Failed to see task transition to the FAILED state")
 
         self.cc.restart_task(connector.name, task_id)
@@ -329,7 +328,7 @@ class ConnectDistributedTest(Test):
         self.cc.set_configs(lambda node: self.render("connect-distributed.properties", node=node))
         self.cc.start()
 
-        self.source = VerifiableSource(self.cc, tasks=num_tasks)
+        self.source = VerifiableSource(self.cc, tasks=num_tasks, throughput=100)
         self.source.start()
         self.sink = VerifiableSink(self.cc, tasks=num_tasks)
         self.sink.start()
@@ -344,11 +343,14 @@ class ConnectDistributedTest(Test):
                     monitor.wait_until("Starting connectors and tasks using config offset", timeout_sec=90,
                                        err_msg="Kafka Connect worker didn't successfully join group and start work")
                 self.logger.info("Bounced Kafka Connect on %s and rejoined in %f seconds", node.account, time.time() - started)
-                # If this is a hard bounce, give additional time for the consumer groups to recover. If we don't give
-                # some time here, the next bounce may cause consumers to be shut down before they have any time to process
-                # data and we can end up with zero data making it through the test.
-                if not clean:
-                    time.sleep(15)
+
+                # Give additional time for the consumer groups to recover. Even if it is not a hard bounce, there are
+                # some cases where a restart can cause a rebalance to take the full length of the session timeout
+                # (e.g. if the client shuts down before it has received the memberId from its initial JoinGroup).
+                # If we don't give enough time for the group to stabilize, the next bounce may cause consumers to 
+                # be shut down before they have any time to process data and we can end up with zero data making it 
+                # through the test.
+                time.sleep(15)
 
 
         self.source.stop()
